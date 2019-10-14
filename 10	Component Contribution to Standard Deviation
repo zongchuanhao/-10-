@@ -1,0 +1,612 @@
+install.packages("readxl") 
+install.packages("highcharter") 
+install.packages("tidyquant") 
+install.packages("timetk") 
+install.packages("tibbletime") 
+install.packages("quantmod") 
+install.packages("PerformanceAnalytics") 
+install.packages("scales")
+library(tidyverse) 
+library(lubridate) 
+library(readxl) 
+library(highcharter) 
+library(tidyquant) 
+library(timetk) 
+library(tibbletime) 
+library(quantmod) 
+library(PerformanceAnalytics) 
+library(scales)
+library(quantmod)
+library(shiny)
+# 这一章的主要目的就是探究资产组合中的每种资产对资产组合标准差的贡献，之所以这么做是因为：
+# 从客观的角度上来讲，我们需要确保风险没有集中于一种资产上
+# 因为这不仅仅会导致风险集中，而且表示我们最初关于特殊资产的假设也是错误的
+# 甚至会随着时间推移正确性继续下降。
+# 从 R工具包的角度来看，我们希望构建自己的定制函数，
+# 将其嵌套在另一个定制函数中以使其滚动，与purrr 结合使用，然后在一个 Shiny 应用程序中一起应用。
+
+# create a portfolio
+symbols <- c("SPY","EFA", "IJS", "EEM","AGG")
+## rename the columns
+prices <- 
+  getSymbols(symbols, 
+             src = 'yahoo', 
+             from = "2012-12-31", 
+             to = "2017-12-31", 
+             auto.assign = TRUE, 
+             warnings = FALSE) %>% 
+  map(~Ad(get(.))) %>% 
+  reduce(merge) %>% 
+  `colnames<-`(symbols)
+
+head(prices, 3)
+## convert daily prices to monthly log returns
+prices_monthly <- to.monthly(prices,
+                             indexAt = "lastof",
+                             OHLC = FALSE)
+head(prices_monthly, 3)
+## convert to returns
+asset_returns_xts <-
+  Return.calculate(prices_monthly,
+                   method = "log") %>%
+  na.omit()
+head(asset_returns_xts, 3)
+## Converting Daily Prices to Monthly Returns in the tidyverse
+asset_returns_dplyr_byhand <-
+  prices %>%
+  to.monthly(indexAt = "lastof", OHLC = FALSE) %>%
+  # convert the index to a date
+  data.frame(date = index(.)) %>%
+  # now remove the index because it got converted to row names
+  remove_rownames() %>%
+  gather(asset, prices, -date) %>%
+  group_by(asset) %>%
+  mutate(returns = (log(prices) - log(lag(prices)))) %>%
+  select(-prices) %>%
+  spread(asset, returns) %>%
+  select(date, symbols)
+head(asset_returns_dplyr_byhand, 3)
+## Remove the first row
+asset_returns_dplyr_byhand <-
+  asset_returns_dplyr_byhand %>%
+  na.omit()
+
+## Visualizing Asset Returns in the xts world
+highchart(type = "stock") %>%
+  hc_title(text = "Monthly Log Returns") %>%
+  hc_add_series(asset_returns_xts[, symbols[1]],
+                name = symbols[1]) %>%
+  hc_add_series(asset_returns_xts[, symbols[2]],
+                name = symbols[2]) %>%
+  hc_add_series(asset_returns_xts[, symbols[3]],
+                name = symbols[3]) %>%
+  hc_add_series(asset_returns_xts[, symbols[4]],
+                name = symbols[4]) %>%
+  hc_add_series(asset_returns_xts[, symbols[5]],
+                name = symbols[5]) %>%
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_navigator(enabled = FALSE) %>%
+  hc_scrollbar(enabled = FALSE) %>%
+  hc_exporting(enabled = TRUE) %>%
+  hc_legend(enabled = TRUE)
+## SPY Returns Histogram highcharter
+hc_hist <- hist(asset_returns_xts[, symbols[1]],
+                breaks = 50,
+                plot = FALSE)
+hchart(hc_hist, color = "cornflowerblue") %>%
+  hc_title(text =
+             paste(symbols[1],
+                   "Log Returns Distribution",
+                   sep = " ")) %>%
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_exporting(enabled = TRUE) %>%
+  hc_legend(enabled = FALSE)
+hc_hist_fun <- function(n = 1, object, color){
+  hc_hist <- hist(object[, symbols[n]],
+                  breaks = 50,
+                  plot = FALSE)
+  hchart(hc_hist, color = color) %>%
+    hc_title(text =
+               paste(symbols[n],
+                     "Log Returns Distribution",
+                     sep = " ")) %>%
+    hc_add_theme(hc_theme_flat()) %>%
+    hc_exporting(enabled = TRUE) %>%
+    hc_legend(enabled = FALSE) 
+  }
+#Building a Portfolio
+## Assign a weight to each asset
+w <- c(0.25,
+       0.25,
+       0.20,
+       0.20,
+       0.10)
+
+tibble(w, symbols)
+
+tibble(w, symbols) %>%
+  summarise(total_weight = sum(w))
+## Convert the returns of 5 assets to the returns of 1 portfolio
+w_1 <- w[1]
+w_2 <- w[2]
+w_3 <- w[3]
+w_4 <- w[4]
+w_5 <- w[5]
+asset1 <- asset_returns_xts[,1]
+asset2 <- asset_returns_xts[,2]
+asset3 <- asset_returns_xts[,3]
+asset4 <- asset_returns_xts[,4]
+asset5 <- asset_returns_xts[,5]
+portfolio_returns_byhand <-
+  (w_1 * asset1) +
+  (w_2 * asset2) +
+  (w_3 * asset3) +
+  (w_4 * asset4) +
+  (w_5 * asset5)
+names(portfolio_returns_byhand) <- "returns"
+## Portfolio Returns in the xts world
+portfolio_returns_xts_rebalanced_monthly <-
+  Return.portfolio(asset_returns_xts,
+                   weights = w,
+                   rebalance_on = "months") %>%
+  `colnames<-`("returns")
+head(portfolio_returns_xts_rebalanced_monthly, 3)
+## Visualizing Portfolio Returns in the xts world
+highchart(type = "stock") %>%
+  hc_title(text = "Portfolio Monthly Returns") %>%
+  hc_add_series(portfolio_returns_xts_rebalanced_monthly$returns,
+                name = "Rebalanced Monthly",
+                color = "cornflowerblue") %>%
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_navigator(enabled = FALSE) %>%
+  hc_scrollbar(enabled = FALSE) %>%
+  hc_legend(enabled = TRUE) %>%
+  hc_exporting(enabled = TRUE)
+
+
+highchart(type = "stock") %>%
+  hc_title(text = "Portfolio Monthly Returns") %>%
+  hc_add_series(portfolio_returns_xts_rebalanced_monthly$returns,
+                name = "Rebalanced Monthly",
+                color = "cornflowerblue") %>%
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_navigator(enabled = FALSE) %>%
+  hc_scrollbar(enabled = FALSE) %>%
+  hc_legend(enabled = TRUE) %>%
+  hc_exporting(enabled = TRUE)
+hc_portfolio <-
+  hist(portfolio_returns_xts_rebalanced_monthly$returns,
+       breaks = 50,
+       plot = FALSE)
+hchart(hc_portfolio,
+       color = "cornflowerblue",
+       name = "Portfolio") %>%
+  hc_title(text = "Portfolio Returns Distribution") %>%
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_exporting(enabled = TRUE)
+
+# 总体的思路是根据计算公式赋值
+## 其参考公式为：每种资产对资产组合的贡献=（资产的边际贡献*权重）/ 资产组合的标准差
+## 这一部分主要是赋值计算每种资产对资产组合贡献。
+## Building the covariance matrix and calculating portfolio standard deviation
+covariance_matrix <-
+  cov(asset_returns_xts)
+sd_portfolio <-
+  sqrt(t(w) %*% covariance_matrix %*% w)
+
+marginal_contribution <-
+  w %*% covariance_matrix / sd_portfolio[1, 1]
+
+component_contribution <-
+  marginal_contribution * w
+## Sum the asset contributions and check that the result equals total portfolio standard deviation
+components_summed <- rowSums(component_contribution)
+components_summed
+sd_portfolio[1,1]
+## The summed components are equal to the total as we hoped
+component_percentages <-
+  component_contribution / sd_portfolio[1, 1]
+round(component_percentages, 3)
+
+# 使用定制函数计算成分贡献
+## 这部分主要是利用component_contr_matrix_fun()函数来重新计算每种资产对资产组合的贡献，
+## 通过performanceanalytics 包中的内置函数tdDev(asset_returns_xts, weights= w, portfolio_method= "component")
+## 我们更加方便的计算出结果。
+## Component Contribution with a Custom Function
+component_contr_matrix_fun <- function(returns, w){
+  # create covariance matrix
+  covariance_matrix <-
+    cov(returns)
+  # calculate portfolio standard deviation
+  sd_portfolio <-
+    sqrt(t(w) %*% covariance_matrix %*% w)
+  # calculate marginal contribution of each asset
+  marginal_contribution <-
+    w %*% covariance_matrix / sd_portfolio[1, 1]
+  # multiply marginal by weights vecotr
+  component_contribution <-
+    marginal_contribution * w
+  # divide by total standard deviation to get percentages
+  component_percentages <-
+    component_contribution / sd_portfolio[1, 1]
+  component_percentages %>%
+    as_tibble() %>%
+    gather(asset, contribution)
+}
+
+test_the_function_xts <-
+  component_contr_matrix_fun(asset_returns_xts, w)
+test_the_function_xts
+
+percentages_tibble <-
+  asset_returns_dplyr_byhand %>%
+  select(-date) %>%
+  component_contr_matrix_fun(., w)
+percentages_tibble
+
+# 成分贡献可视化
+## 这部分主要是利用管道函数，将数据导入到 ggplot () ，并使用 geom bar ()在 y 轴上绘制风险贡献图。
+## Visualizing Component Contribution
+## chart risk contribution on the y-axis
+percentages_tibble %>%
+  ggplot(aes(x = asset, y = contribution)) +
+  geom_col(fill = 'cornflowerblue',
+           colour = 'pink',
+           width = .6) +
+  scale_y_continuous(labels = percent,
+                     breaks = pretty_breaks(n = 20)) +
+  ggtitle("Percent Contribution to Standard Deviation") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Asset") +
+  ylab("Percent Contribution to Risk")
+## Weight versus Contribution
+percentages_tibble %>%
+  mutate(weights = w) %>%
+  gather(type, percent, -asset) %>%
+  group_by(type) %>%
+  ggplot(aes(x = asset,
+             y = percent,
+             fill = type)) +
+  geom_col(position='dodge') +
+  scale_y_continuous(labels = percent) +
+  ggtitle("Percent Contribution to Volatility") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#  滚动成分贡献
+## 我们这章最复杂的任务是计算每个资产的滚动波动贡献。
+## 前面的部分告诉我们每种资产在投资组合生命周期内的总贡献，但是它不能帮助我们理解随着时间的推移风险组成部分。
+## 为了获得这种理解，我们需要创建一个函数，在提供4个参数之后，计算滚动对标准差的贡献:
+## 1)资产回报2)投资组合权重3)开始日期4)滚动窗口
+## 基本的逻辑是：1）指定一个开始日期和滚动窗口。2）根据开始日期和窗口分配结束日期。 3）使用 filter ()对原始数据设置子集。
+## 4）根据权重参数分配一个称为 w 的权重对象。5)利用管道函数传递数据 6)在运行component_contr_matrix_fun()之后，我们设置component_percentages的对象。
+## 7)利用mutate(date = ymd(end_date))将日期添加到component_percentages中。
+## 8)我们默认 start = 1。 如果我们想得到从第二天或2013年2月开始的24个月期间的风险贡献，我们会设置  start = 2
+## 9)如果我们想要所有24个月期间的风险贡献，我们需要逐次根据月份应用这个函数，一直到数据结束前24个月的开始日期。
+
+# Rolling Component Contribution
+##Turn enumerated steps into a function
+interval_sd_by_hand <-
+  function(returns_df,
+           start = 1,
+           window = 24,
+           weights){
+    # First create start date.
+    start_date <-
+      returns_df$date[start]
+    # Next create an end date that depends
+    # on start date and window.
+    end_date <-
+      returns_df$date[c(start + window)]
+    # Filter on start and end date.
+    returns_to_use <-
+      returns_df %>%
+      filter(date >= start_date & date < end_date) %>%
+      select(-date)
+    # Portfolio weights
+    w <- weights
+    # Call our original custom function
+    # We are nesting one function inside another
+    component_percentages <-
+      component_contr_matrix_fun(returns_to_use, w)
+    # Add back the end date as date column
+    results_with_date <-
+      component_percentages %>%
+      mutate(date = ymd(end_date)) %>%
+      select(date, everything()) %>%
+      spread(asset, contribution) %>%
+      # Round the results for better presentation
+      mutate_if(is.numeric, function(x) x * 100)
+    }
+## Test our work
+test_interval_function_1 <-
+  interval_sd_by_hand(asset_returns_dplyr_byhand,
+                      start = 1,
+                      window = 24,
+                      weights = w)
+test_interval_function_1
+
+test_interval_function_2 <-
+  interval_sd_by_hand(asset_returns_dplyr_byhand,
+                      start = 2,
+                      window = 24,
+                      weights = w) %>%
+  mutate_if(is.numeric, funs(round(., 3)))
+test_interval_function_2
+##  Apply our rolling function iteratively, looping over the date index of our returns object
+window <- 24
+portfolio_vol_components_tidy_by_hand <-
+  map_df(1:(nrow(asset_returns_dplyr_byhand) - window),
+         interval_sd_by_hand,
+         returns_df = asset_returns_dplyr_byhand,
+         weights = w,
+         window = window)
+tail(portfolio_vol_components_tidy_by_hand)
+
+# 滚动成分贡献可视化
+## 从ggplot ()开始，首先需要转换一下格式，然后利用ggplot（）根据资产生成图表。
+## 在图表中，很容易看出随着时间变化每种资产的贡献。
+## 然后我们利用geom_area(aes(colour=asset, fill=asset),  position =’tack’) 生成堆叠图。
+## 但是堆叠图比直线图传递的信息少，所以我们转向highcharter，重新创建滚动贡献图。
+## 利用管道函数将数据导入tk_xts(date_var = date).然后将时间序列加入到 highchart() 中。
+## 如果形成堆叠图需要设置hc_chart(type = "area")  和 hc_plotOptions(area = list(stacking = "percent"...)。
+
+# Visualizing Rolling Component Contribution
+portfolio_vol_components_tidy_by_hand %>%
+  gather(asset, contribution, -date) %>%
+  group_by(asset) %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = contribution,
+                color = asset)) +
+  scale_x_date(breaks =
+                 pretty_breaks(n = 8)) +
+  scale_y_continuous(labels =
+                       function(x) paste0(x, "%"))
+## Stacked Component Contribution ggplot
+portfolio_vol_components_tidy_by_hand %>%
+  gather(asset, contribution, -date) %>%
+  group_by(asset) %>%
+  ggplot(aes(x = date,
+             y = contribution)) +
+  geom_area(aes(colour = asset,
+                fill= asset),
+            position = 'stack') +
+  scale_x_date(breaks =
+                 pretty_breaks(n = 8)) +
+  scale_y_continuous(labels =
+                       function(x) paste0(x, "%"))
+## Recreate those rolling contribution charts
+portfolio_vol_components_tidy_xts <-
+  portfolio_vol_components_tidy_by_hand %>%
+  tk_xts(date_var = date,
+         silent = TRUE)
+highchart(type = "stock") %>%
+  hc_title(text = "Volatility Contribution") %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 1],
+                name = symbols[1]) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 2],
+                name = symbols[2]) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 3],
+                name = symbols[3]) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 4],
+                name = symbols[4]) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 5],
+                name = symbols[5]) %>%
+  hc_yAxis(labels = list(format = "{value}%"),
+           max = max(portfolio_vol_components_tidy_xts) + 5,
+           min = min(portfolio_vol_components_tidy_xts) - 5,
+           opposite = FALSE) %>%
+  hc_navigator(enabled = FALSE) %>%
+  hc_scrollbar(enabled = FALSE) %>%
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_exporting(enabled = TRUE) %>%
+  hc_legend(enabled = TRUE)
+
+highchart() %>%
+  hc_chart(type = "area") %>%
+  hc_title(text = "Volatility Contribution") %>%
+  hc_plotOptions(area = list(
+    stacking = "percent",
+    lineColor = "#ffffff",
+    lineWidth = 1,
+    marker = list(
+      lineWidth = 1,
+      lineColor = "#ffffff"
+    ))
+  ) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 1],
+                name = symbols[1]) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 2],
+                name = symbols[2]) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 3],
+                name = symbols[3]) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 4],
+                name = symbols[4]) %>%
+  hc_add_series(portfolio_vol_components_tidy_xts[, 5],
+                name = symbols[5]) %>%
+  hc_yAxis(labels = list(format = "{value}%"),
+           opposite = FALSE) %>%
+  hc_xAxis(type = "datetime") %>%
+  hc_tooltip(pointFormat =
+               "<span style=\"color:{series.color}\">
+{series.name}</span>:<b>{point.percentage:.1f}%</b><br/>",
+             shared = TRUE) %>%
+  hc_navigator(enabled = FALSE) %>%
+  hc_scrollbar(enabled = FALSE) %>%
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_exporting(enabled = TRUE) %>%
+  hc_legend(enabled = TRUE)
+
+
+#  Shiny中的成分贡献
+## 最后，我们使用Shiny应用程序，它允许终端用户构建一个自定义投资组合，
+## 选择一个滚动窗口，并绘制每个资产的滚动风险贡献图。
+## 这个应用程序使用我们的标准输入边栏，这能够让用户选择股票、权重和开始日期以及滚动窗口。
+## 更重要的是，我们可以使用定制函数component_contr_matrix_fun 和interval_sd_by_hand(). 
+
+#Shiny App Component Contribution
+##以下是一个使用举例
+library(shiny)
+interval_sd_by_hand <-
+  function(returns_df,
+           start = 1,
+           window = 24,
+           weights){
+    # 建立起始日
+    start_date <-
+      returns_df$date[start]
+    # 建立截止日期
+    end_date <-
+      returns_df$date[c(start + window)]
+    # 筛选开始日期和截止日期
+    returns_to_use <-
+      returns_df %>%
+      filter(date >= start_date & date < end_date) %>%
+      select(-date)
+    # 资产组合权重
+    w <- weights
+    # 调用原始自定义函数
+    # 函数嵌套
+    component_percentages <-
+      component_contr_matrix_fun(returns_to_use, w)
+    # 重新添加截止日期作为日期列
+    results_with_date <-
+      component_percentages %>%
+      mutate(date = ymd(end_date)) %>%
+      select(date, everything()) %>%
+      spread(asset, contribution) %>%
+      mutate_if(is.numeric, function(x) x * 100)
+    }
+## Calculate asset returns
+asset_returns_dplyr_byhand <- eventReactive(input$go, {
+  symbols <- c(input$stock1, input$stock2,
+               input$stock3, input$stock4, input$stock5)
+  prices <-
+    getSymbols(symbols, src = 'yahoo', from = input$date,
+               auto.assign = TRUE, warnings = FALSE) %>%
+    map(~Ad(get(.))) %>%
+    reduce(merge) %>%
+    `colnames<-`(symbols)
+  asset_returns_dplyr_byhand <-
+    prices %>%
+    to.monthly(indexAt = "last", OHLC = FALSE) %>%
+    tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
+    gather(asset, returns, -date) %>%
+    group_by(asset) %>%
+    mutate(returns = (log(returns) - log(lag(returns)))) %>%
+    spread(asset, returns) %>%
+    select(date, symbols) %>%
+    slice(-1)
+})
+## Call our custom function to calculate overall contribution to risk
+percentages_tibble_pre_built <- eventReactive(input$go, {
+  asset_returns_xts <-
+    asset_returns_dplyr_byhand() %>%
+    tk_xts(date_col = date)
+  w <- c(input$w1/100, input$w2/100,
+         input$w3/100, input$w4/100, input$w5/100)
+  port_vol_contr_total_builtin <-
+    StdDev(asset_returns_xts,
+           weights = w,
+           portfolio_method = "component")
+  symbols <- c(input$stock1, input$stock2,
+               input$stock3, input$stock4, input$stock5)
+  percentages_tibble_pre_built <-
+    port_vol_contr_total_builtin$pct_contrib_StdDev %>%
+    tk_tbl(preserve_index = FALSE) %>%
+    mutate(asset = symbols) %>%
+    rename('risk contribution' = data) %>%
+    mutate(`risk contribution` =
+             round(`risk contribution`, 4) * 100,
+           weights = w * 100) %>%
+    select(asset, everything())
+})
+## Calculate rolling contribution to standard deviation
+portfolio_vol_components_xts <- eventReactive(input$go, {
+  asset_returns_dplyr_byhand <- asset_returns_dplyr_byhand()
+  w <- c(input$w1/100, input$w2/100,
+         input$w3/100, input$w4/100,
+         input$w5/100)
+  portfolio_vol_components_tidy_by_hand <-
+    map_df(1:(nrow(asset_returns_dplyr_byhand) - input$window),
+           interval_sd_by_hand,
+           returns_df = asset_returns_dplyr_byhand,
+           weights = w,
+           window = input$window) %>%
+    tk_xts(date_col = date)
+})
+## Visualize first with highcharter
+renderHighchart({
+  portfolio_vol_components <-
+    portfolio_vol_components_xts()
+  highchart(type = "stock") %>%
+    hc_title(text = "Volatility Contribution") %>%
+    hc_add_series(portfolio_vol_components[, 1],
+                  name = names(portfolio_vol_components[, 1])) %>%
+    hc_add_series(portfolio_vol_components[, 2],
+                  name = names(portfolio_vol_components[, 2])) %>%
+    hc_add_series(portfolio_vol_components[, 3],
+                  name = names(portfolio_vol_components[, 3])) %>%
+    hc_add_series(portfolio_vol_components[, 4],
+                  name = names(portfolio_vol_components[, 4])) %>%
+    hc_add_series(portfolio_vol_components[, 5],
+                  name = names(portfolio_vol_components[, 5])) %>%
+    hc_add_theme(hc_theme_flat()) %>%
+    hc_yAxis(
+      labels = list(format = "{value}%"),
+      opposite = FALSE,
+      min = min(portfolio_vol_components) -5,
+      max = max(portfolio_vol_components) + 5) %>%
+    hc_navigator(enabled = FALSE) %>%
+    hc_scrollbar(enabled = FALSE)
+})
+## Stacked area chart
+renderHighchart({
+  portfolio_vol_components <-
+    portfolio_vol_components_xts()
+  highchart() %>%
+    hc_chart(type = "area") %>%
+    hc_title(text = "Stacked Volatility Contribution") %>%
+    hc_plotOptions(area = list(
+      stacking = "percent",
+      lineColor = "#ffffff",
+      lineWidth = 1,
+      marker = list(
+        lineWidth = 1,
+        lineColor = "#ffffff"
+      ))
+    ) %>%
+    hc_add_series(portfolio_vol_components[, 1],
+                  name = names(portfolio_vol_components[, 1])) %>%
+    hc_add_series(portfolio_vol_components[, 2],
+                  name = names(portfolio_vol_components[, 2])) %>%
+    hc_add_series(portfolio_vol_components[, 3],
+                  name = names(portfolio_vol_components[, 3])) %>%
+    hc_add_series(portfolio_vol_components[, 4],
+                  name = names(portfolio_vol_components[, 4])) %>%
+    hc_add_series(portfolio_vol_components[, 5],
+                  name = names(portfolio_vol_components[, 5])) %>%
+    hc_yAxis(labels = list(format = "{value}%"),
+             opposite = FALSE) %>%
+    hc_xAxis(type = "datetime") %>%
+    hc_tooltip(pointFormat =
+                 "<span style=\"color:{series.color}\">
+{series.name}</span>:<b>{point.percentage:.1f}%</b><br/>",
+               shared = TRUE) %>%
+    hc_navigator(enabled = FALSE) %>%
+    hc_scrollbar(enabled = FALSE) %>%
+    hc_add_theme(hc_theme_flat()) %>%
+    hc_exporting(enabled = TRUE) %>%
+    hc_legend(enabled = TRUE)
+})
+## Build the bar chart showing weights versus contribution to volatility
+renderPlot({
+  percentages_tibble_pre_built() %>%
+    gather(type, percent, -asset) %>%
+    group_by(type) %>%
+    mutate(percent = percent/100) %>%
+    ggplot(aes(x = asset, y = percent, fill = type)) +
+    geom_col(position = 'dodge') +
+    scale_y_continuous(labels = percent) +
+    ggtitle("Percent Contribution to Volatility") +
+    theme(plot.title = element_text(hjust = 0.5))
+})
