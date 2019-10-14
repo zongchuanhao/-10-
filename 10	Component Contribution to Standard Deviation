@@ -1,6 +1,7 @@
 install.packages("readxl") 
 install.packages("highcharter") 
 install.packages("tidyquant") 
+install.packages("tidyverse") 
 install.packages("timetk") 
 install.packages("tibbletime") 
 install.packages("quantmod") 
